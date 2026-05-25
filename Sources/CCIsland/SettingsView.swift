@@ -11,14 +11,14 @@ struct SettingsView: View {
     @Environment(\.ccTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             // Header: centered title with back chip overlaid on the leading
             // edge. Built as a Text + .overlay so the title's centering is
             // calculated against the full row width, independent of the
             // chip's size.
             Text("Settings")
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundColor(theme.primaryText)
+                .foregroundColor(theme.text(.primary))
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 28)
                 .overlay(alignment: .leading) {
@@ -29,7 +29,7 @@ struct SettingsView: View {
                             Text("Back")
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                         }
-                        .foregroundColor(theme.primaryText)
+                        .foregroundColor(theme.text(.primary))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(Capsule().fill(theme.chrome(0.12)))
@@ -43,11 +43,11 @@ struct SettingsView: View {
 
             // Placement picker: anchored under the notch, or free-floating
             // anywhere the user drags it.
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Placement")
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .tracking(0.5)
-                    .foregroundColor(theme.secondaryText(0.5))
+                    .foregroundColor(theme.text(.tertiary))
                 HStack(spacing: 3) {
                     ForEach(Placement.allCases) { option in
                         PlacementChip(
@@ -66,11 +66,11 @@ struct SettingsView: View {
             // Appearance picker. 5 options: Auto/Dark/Light + two glass
             // variants (clear material vs. soft white tint). "Auto" follows
             // the macOS system Dark/Light setting.
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Appearance")
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .tracking(0.5)
-                    .foregroundColor(theme.secondaryText(0.5))
+                    .foregroundColor(theme.text(.tertiary))
                 HStack(spacing: 3) {
                     ForEach(Appearance.allCases) { option in
                         AppearanceChip(
@@ -96,7 +96,7 @@ struct SettingsView: View {
                 Toggle(isOn: $launchAtLogin) {
                     Text("Launch at login")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundColor(theme.secondaryText(0.9))
+                        .foregroundColor(theme.text(.secondary))
                 }
                 .toggleStyle(SwitchToggleStyle())
                 .tint(.green)
@@ -154,7 +154,7 @@ private struct AppearanceChip: View {
                     .lineLimit(1)
                     .fixedSize()
             }
-            .foregroundColor(selected ? .white : theme.secondaryText(0.85))
+            .foregroundColor(selected ? .white : theme.text(.secondary))
             .padding(.horizontal, 6)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
@@ -193,7 +193,7 @@ private struct PlacementChip: View {
                     .lineLimit(1)
                     .fixedSize()
             }
-            .foregroundColor(selected ? .white : theme.secondaryText(0.85))
+            .foregroundColor(selected ? .white : theme.text(.secondary))
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)

@@ -82,10 +82,31 @@ struct IslandView: View {
 
     @State private var expanded = false
     @State private var showSettings = false
+    @State private var finishVisibleUntil: Date?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// How long FINISH stays visible in notch mode before auto-dismissing
+    /// back to the resets-countdown view. On external display / free-move
+    /// the banner persists as long as the real state holds.
+    private static let finishAutoDismissSeconds: TimeInterval = 4
 
     private var geometry: IslandGeometry { config.geometry }
     private var theme: Theme { Theme(resolved: appearance.resolved) }
     private var isFreeMove: Bool { placement.mode == .freeMove }
+
+    /// Apple HIG-aligned animation curves. One spring for UI interaction
+    /// (hover/expand/settings), one slightly slower for the drop-in/out from
+    /// the notch. Reduce Motion downgrades both to a brief fade.
+    private var uiSpring: Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.18)
+            : .spring(response: 0.4, dampingFraction: 0.86)
+    }
+    private var dropSpring: Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.22)
+            : .spring(response: 0.55, dampingFraction: 0.82)
+    }
 
     /// On a real notched MacBook display in notch placement, the collapsed
     /// pill must remain black so it visually merges with the camera
@@ -103,7 +124,7 @@ struct IslandView: View {
     /// so the dropdown can show live block tokens + reset countdown. Only
     /// truly empty state (no recent CC use at all) hides the island.
     private var visible: Bool {
-        expanded || monitor.snapshot.hasActivity || hasRecentBlock
+        expanded || hasDropdownState
     }
 
     private var hasRecentBlock: Bool {
@@ -111,15 +132,38 @@ struct IslandView: View {
         return monitor.snapshot.blockStart != nil && monitor.snapshot.tokensBlock > 0
     }
 
+    /// The dropdown row is meaningful in three cases: actively WORKING
+    /// (pulsing dots), waiting on a decision (FINISH checkmark), or
+    /// between turns with a live 5h block (tokens + resets clock). Outside
+    /// these, the pill stays as the bare idle silhouette.
+    private var hasDropdownState: Bool {
+        monitor.snapshot.isWorking
+            || displayedIsAwaitingDecision
+            || hasRecentBlock
+    }
+
+    /// Real `isAwaitingDecision` filtered through the notch-mode
+    /// auto-dismiss timer. In notch placement the FINISH banner shows for
+    /// `finishAutoDismissSeconds`, then collapses to the resets view so
+    /// it doesn't squat under the camera housing for the rest of the
+    /// session. Elsewhere (external / free-move) the banner persists.
+    private var displayedIsAwaitingDecision: Bool {
+        guard monitor.snapshot.isAwaitingDecision else { return false }
+        let inNotchMode = geometry.hasPhysicalNotch && !isFreeMove
+        guard inNotchMode else { return true }
+        if let until = finishVisibleUntil, Date() < until { return true }
+        return false
+    }
+
     private var size: CGSize {
         let docked = geometry.hasPhysicalNotch && !isFreeMove
         if expanded { return geometry.expandedSize(dockedUnderNotch: docked) }
-        if monitor.snapshot.hasActivity || hasRecentBlock { return geometry.activeSize }
+        if hasDropdownState { return geometry.activeSize }
         return geometry.idleSize
     }
     private var cornerRadius: CGFloat {
         if expanded { return geometry.expandedCornerRadius }
-        return (monitor.snapshot.hasActivity || hasRecentBlock)
+        return (hasDropdownState)
             ? geometry.activeCornerRadius
             : geometry.idleCornerRadius
     }
@@ -128,20 +172,8 @@ struct IslandView: View {
         let t = effectiveTheme
         return VStack(spacing: 0) {
             ZStack {
-                // Backdrop. Glass uses NSVisualEffectView with its OWN layer
-                // corner radius — SwiftUI's clipShape would force a render
-                // pass that breaks `.behindWindow` blur, producing an opaque
-                // gray rectangle instead of true vibrancy.
-                Group {
-                    if t.isGlass {
-                        VisualEffectBackground(material: .hudWindow,
-                                               cornerRadius: cornerRadius,
-                                               roundTopCorners: isFreeMove)
-                        shape.fill(t.panelTint)
-                    } else {
-                        shape.fill(t.panelFill)
-                    }
-                }
+                shape
+                    .fill(t.panelFill)
                 .overlay(
                     shape
                         .strokeBorder(
@@ -152,13 +184,18 @@ struct IslandView: View {
                             lineWidth: 0.5
                         )
                 )
-                .shadow(color: t.shadow, radius: 18, y: 8)
+                // Layered shadows simulate `backgroundExtensionEffect` —
+                // a tight contact shadow plus a wider ambient halo so the
+                // card reads as floating above the desktop, with its
+                // presence extending past the visible silhouette.
+                .shadow(color: t.shadow.opacity(0.7), radius: 6, y: 2)
+                .shadow(color: t.shadow.opacity(0.45), radius: 24, y: 14)
 
                 if expanded {
                     Group {
                         if showSettings {
                             SettingsView(closeAction: {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                withAnimation(uiSpring) {
                                     showSettings = false
                                 }
                             })
@@ -167,12 +204,13 @@ struct IslandView: View {
                         }
                     }
                     .padding(.horizontal, 20)
-                    // Notched + notch placement: leave room for the notch
-                    // band above. Otherwise (external display, or free-move
-                    // anywhere): only breathing room from the rounded top.
+                    // Symmetric vertical insets: same visible margin top
+                    // and bottom. In notch placement, the top inset adds
+                    // `notchHeight` so the visible 16pt margin starts
+                    // below the camera housing, matching the 16pt below.
                     .padding(.top, (geometry.hasPhysicalNotch && !isFreeMove)
-                                   ? geometry.notchHeight + 14
-                                   : 18)
+                                   ? geometry.notchHeight + 16
+                                   : 16)
                     .padding(.bottom, 16)
                     // Top-align so an overflowing SettingsView never gets
                     // vertically centered — that was clipping the header
@@ -195,12 +233,12 @@ struct IslandView: View {
             // slightly later so the motion reads as growth, not a pop.
             .scaleEffect(x: 1, y: visible ? 1 : 0.02, anchor: .top)
             .opacity(visible ? 1 : 0)
-            .animation(.spring(response: 0.55, dampingFraction: 0.78), value: visible)
+            .animation(dropSpring, value: visible)
             .onHover { hovering in
                 // Hold expanded open while the settings panel is in use, even
                 // if the cursor briefly slips outside the card.
                 if !hovering && showSettings { return }
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                withAnimation(uiSpring) {
                     expanded = hovering
                 }
             }
@@ -216,6 +254,32 @@ struct IslandView: View {
         .onChange(of: size.height) { _ in updateHitArea() }
         .onChange(of: geometry.expandedSize.width) { _ in updateHitArea() }
         .onChange(of: geometry.expandedSize.height) { _ in updateHitArea() }
+        // Arm the FINISH auto-dismiss timer the moment `isAwaitingDecision`
+        // flips true. Schedule a delayed re-render so the dropdown
+        // collapses cleanly when the window passes — without needing
+        // UsageMonitor to tick at exactly the right moment.
+        .onChange(of: monitor.snapshot.isAwaitingDecision) { isAwait in
+            if isAwait {
+                let until = Date().addingTimeInterval(Self.finishAutoDismissSeconds)
+                finishVisibleUntil = until
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.finishAutoDismissSeconds + 0.05) {
+                    if finishVisibleUntil == until { finishVisibleUntil = nil }
+                }
+            } else {
+                finishVisibleUntil = nil
+            }
+        }
+        // Smart animation — every state change in the snapshot interpolates
+        // through the same spring as hover/expand. Chips appearing, lights
+        // hiding when work starts, model swaps mid-session, dropdown text
+        // switching between WORKING / FINISH / resets — all coherent.
+        .animation(uiSpring, value: monitor.snapshot.workState)
+        .animation(uiSpring, value: monitor.snapshot.currentModel)
+        .animation(uiSpring, value: monitor.snapshot.currentModelTraits.thinking)
+        .animation(uiSpring, value: monitor.snapshot.currentModelTraits.oneMillionContext)
+        .animation(uiSpring, value: monitor.snapshot.currentModelTraits.fastMode)
+        .animation(uiSpring, value: monitor.snapshot.activeSessions)
+        .animation(uiSpring, value: hideLightsForActiveState)
     }
 
     /// Publishes the visible pill rect in NSHostingView coordinates so the
@@ -250,12 +314,7 @@ struct IslandView: View {
         )
     }
 
-    /// Top corner radius for the NSVisualEffectView's CALayer in glass mode.
-    /// Mirrors the SwiftUI `shape` decision so the blurred backdrop matches
-    /// the silhouette in both placements.
-    private var topCornerRadiusForLayer: CGFloat { isFreeMove ? cornerRadius : 0 }
-
-    /// Collapsed pill. Layout depends on whether the pill is currently
+/// Collapsed pill. Layout depends on whether the pill is currently
     /// docked under a physical notch.
     ///
     /// • Notched + notch placement: top row is empty (merges with the
@@ -273,19 +332,52 @@ struct IslandView: View {
         }
     }
 
+    /// When the user is actively in WORKING or FINISH state, the dropdown
+    /// IS the status indicator (pulsing dots / green checkmark) — side
+    /// lights become redundant noise. Hide them so the active state reads
+    /// like a clean iOS Dynamic Island moment.
+    /// True when the dropdown is in idle-with-block "reset clock only"
+    /// mode — model + tokens fall away, leaving a minimal clock chip.
+    /// Hover for full details (the expanded card has model + tokens).
+    private var isResetOnlyDropdown: Bool {
+        hasRecentBlock
+            && !monitor.snapshot.isWorking
+            && !displayedIsAwaitingDecision
+    }
+
+    private var hideLightsForActiveState: Bool {
+        monitor.snapshot.isWorking
+            || displayedIsAwaitingDecision
+            || isResetOnlyDropdown
+    }
+
+    /// The idle-state WorkDot is just a static gray dot — it conveys
+    /// nothing the absence of animation doesn't already. Skip it.
+    private var showWorkDot: Bool {
+        !hideLightsForActiveState && monitor.snapshot.workState != .idle
+    }
+
     private var notchCollapsedContent: some View {
         VStack(spacing: 0) {
             // Notch row — flush with the camera housing.
             Color.clear.frame(height: geometry.notchHeight)
 
-            if monitor.snapshot.hasActivity || hasRecentBlock {
+            if hasDropdownState {
                 HStack(spacing: 0) {
-                    ModelDot(model: monitor.snapshot.currentModel,
-                             traits: monitor.snapshot.currentModelTraits)
-                    Spacer(minLength: 6)
+                    if !hideLightsForActiveState {
+                        ModelDot(model: monitor.snapshot.currentModel,
+                                 traits: monitor.snapshot.currentModelTraits)
+                        Spacer(minLength: 6)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
                     dropdownCenter
-                    Spacer(minLength: 6)
-                    WorkDot(state: monitor.snapshot.workState)
+                    if showWorkDot {
+                        Spacer(minLength: 6)
+                        WorkDot(state: monitor.snapshot.workState)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .frame(height: geometry.dropdownHeight)
@@ -295,17 +387,28 @@ struct IslandView: View {
     }
 
     private var externalCollapsedContent: some View {
-        // Single horizontal row that fills the pill. The lights always show
-        // (even when idle) — they're the entire reason the pill is visible.
+        // Single horizontal row that fills the pill. Lights only show in
+        // idle / between-turns state; during WORKING and FINISH the
+        // dropdown content carries the status indicator itself.
         HStack(spacing: 0) {
-            ModelDot(model: monitor.snapshot.currentModel,
-                     traits: monitor.snapshot.currentModelTraits)
-            Spacer(minLength: 6)
-            if monitor.snapshot.hasActivity || hasRecentBlock {
-                dropdownCenter
+            if !hideLightsForActiveState {
+                ModelDot(model: monitor.snapshot.currentModel,
+                         traits: monitor.snapshot.currentModelTraits)
                 Spacer(minLength: 6)
+            } else {
+                Spacer(minLength: 0)
             }
-            WorkDot(state: monitor.snapshot.workState)
+            if hasDropdownState {
+                dropdownCenter
+                if showWorkDot {
+                    Spacer(minLength: 6)
+                }
+            }
+            if showWorkDot {
+                WorkDot(state: monitor.snapshot.workState)
+            } else {
+                Spacer(minLength: 0)
+            }
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
@@ -341,14 +444,28 @@ struct IslandView: View {
         return tags
     }
 
+    /// Activity-badge style trait chip, inspired by Apple's Landmarks
+    /// sample. Background is a subtle gradient (tint top → tint-faded
+    /// bottom) with a hairline stroke for material depth — the same
+    /// look the new SwiftUI `.glassEffect()` produces on macOS 26+.
     private func traitChip(_ text: String, help: String) -> some View {
         let tint = ModelDot.colorForModel(monitor.snapshot.currentModel)
         return Text(text)
             .font(.system(size: 9, weight: .bold, design: .rounded))
-            .tracking(0.6)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(tint.opacity(0.22)))
+            .tracking(0.5)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.28), tint.opacity(0.16)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                )
+            )
+            .overlay(
+                Capsule().strokeBorder(tint.opacity(0.35), lineWidth: 0.5)
+            )
             .foregroundColor(tint)
             .help(help)
     }
@@ -373,13 +490,22 @@ struct IslandView: View {
         // The collapsed pill on a notched display always uses the dark
         // theme (notch illusion), so use effectiveTheme — not the global one.
         let t = effectiveTheme
-        if monitor.snapshot.isAwaitingDecision {
-            Text("FINISH")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .tracking(1.2)
-                .foregroundColor(.green)
+        if displayedIsAwaitingDecision {
+            HStack(spacing: 5) {
+                PulsingCheckmark()
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.6).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+                Text("FINISH")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .tracking(1.0)
+                    .foregroundColor(.green)
+            }
+            .lineLimit(1)
         } else if monitor.snapshot.isWorking {
             HStack(spacing: 6) {
+                PulsingDots(color: workingWordColor)
                 Text(workingWord)
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .tracking(0.8)
@@ -387,31 +513,34 @@ struct IslandView: View {
                 separator
                 Text(workingTimeString())
                     .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundColor(t.secondaryText(0.7))
+                    .foregroundColor(t.text(.secondary))
                     .monospacedDigit()
             }
             .lineLimit(1)
         } else {
+            // Idle-with-block — utilization % and reset clock, side by
+            // side. Lights hide so the dropdown reads as a clean status
+            // chip; model + tokens live in the expanded card.
             HStack(spacing: 6) {
                 if let five = monitor.snapshot.planUsage?.fiveHour {
                     Text(percentString(five.utilization))
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundColor(t.primaryText)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(t.text(.primary))
                         .monospacedDigit()
                 } else {
                     Text(formatTokens(monitor.snapshot.tokensBlock))
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundColor(t.primaryText)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(t.text(.primary))
                         .monospacedDigit()
                 }
                 separator
-                HStack(spacing: 3) {
-                    Text("resets")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundColor(t.secondaryText(0.5))
+                HStack(spacing: 4) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(t.text(.tertiary))
                     Text(sessionResetClockString())
-                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundColor(t.secondaryText(0.75))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(t.text(.secondary))
                         .monospacedDigit()
                 }
             }
@@ -434,7 +563,7 @@ struct IslandView: View {
 
     private var separator: some View {
         Circle()
-            .fill(effectiveTheme.secondaryText(0.25))
+            .fill(effectiveTheme.text(.quaternary))
             .frame(width: 2, height: 2)
     }
 
@@ -450,114 +579,115 @@ struct IslandView: View {
 
     private var expandedContent: some View {
         let t = theme
-        return VStack(alignment: .leading, spacing: 14) {
+        // Outer rhythm follows an 8pt grid: 16 between sections, 8 within.
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
                 ModelDot(model: monitor.snapshot.currentModel,
                          traits: monitor.snapshot.currentModelTraits)
                 Text(modelDisplayName)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundColor(t.primaryText)
+                    .foregroundColor(t.text(.primary))
                 ForEach(modelTraitTags, id: \.label) { tag in
                     traitChip(tag.label, help: tag.help)
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 1) {
-                    HStack(spacing: 6) {
-                        WorkDot(state: monitor.snapshot.workState)
-                        Text(headerLabel)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.85))
-                        // Concurrent-session badge — only when there's more
-                        // than one; for the typical single-session case the
-                        // badge would just add noise.
-                        if monitor.snapshot.activeSessions > 1 {
-                            Text("×\(monitor.snapshot.activeSessions)")
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .foregroundColor(t.secondaryText(0.7))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(t.chrome(0.10)))
-                                .help("\(monitor.snapshot.activeSessions) active sessions")
+                VStack(alignment: .trailing, spacing: 2) {
+                    // Status only shown when there's something active to
+                    // communicate. Idle = no row — the model name +
+                    // metrics already tell you everything.
+                    if monitor.snapshot.workState != .idle {
+                        HStack(spacing: 6) {
+                            WorkDot(state: monitor.snapshot.workState)
+                            Text(headerLabel)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundColor(t.text(.secondary))
+                            if monitor.snapshot.activeSessions > 1 {
+                                Text("×\(monitor.snapshot.activeSessions)")
+                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                                    .foregroundColor(t.text(.secondary))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(t.chrome(0.10)))
+                                    .help("\(monitor.snapshot.activeSessions) active sessions")
+                            }
                         }
-                    }
-                    if let last = monitor.snapshot.lastActivity {
-                        Text(relativeTime(last))
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.5))
+                        if let last = monitor.snapshot.lastActivity {
+                            Text(relativeTime(last))
+                                .font(.system(size: 9, weight: .medium, design: .rounded))
+                                .foregroundColor(t.text(.tertiary))
+                        }
                     }
                 }
                 Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    withAnimation(uiSpring) {
                         showSettings = true
                     }
                 } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(t.secondaryText(0.55))
+                        .foregroundColor(t.text(.tertiary))
                         .frame(width: 22, height: 22)
                         .background(Circle().fill(t.chrome(0.08)))
                 }
                 .buttonStyle(.plain)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(monitor.snapshot.planUsage?.fiveHour != nil ? "Session" : "5-hour block")
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .tracking(0.5)
-                        .foregroundColor(t.secondaryText(0.5))
+                        .foregroundColor(t.text(.tertiary))
                     Spacer()
                     Text("resets \(sessionResetClockString())")
                         .font(.system(size: 10, weight: .semibold, design: .rounded))
-                        .foregroundColor(t.secondaryText(0.5))
+                        .foregroundColor(t.text(.tertiary))
                 }
                 if let five = monitor.snapshot.planUsage?.fiveHour {
                     HStack(alignment: .lastTextBaseline, spacing: 6) {
                         Text(percentString(five.utilization))
                             .font(.system(size: 26, weight: .bold, design: .rounded))
-                            .foregroundColor(t.primaryText)
+                            .foregroundColor(t.text(.primary))
                             .monospacedDigit()
                         Text("used")
                             .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.5))
+                            .foregroundColor(t.text(.tertiary))
                         Spacer()
                         Text("\(formatTokens(monitor.snapshot.tokensBlock)) · \(String(format: "$%.2f", monitor.snapshot.costBlock))")
                             .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.55))
+                            .foregroundColor(t.text(.tertiary))
                             .monospacedDigit()
                     }
                     ProgressTrack(progress: max(0, min(1, five.utilization)))
                 } else {
+                    // Dual-hero treatment: tokens on the left, dollars on
+                    // the right — both at the same display size so neither
+                    // visually outranks the other.
                     HStack(alignment: .lastTextBaseline, spacing: 6) {
                         Text(formatTokens(monitor.snapshot.tokensBlock))
                             .font(.system(size: 26, weight: .bold, design: .rounded))
-                            .foregroundColor(t.primaryText)
+                            .foregroundColor(t.text(.primary))
+                            .monospacedDigit()
                         Text("tokens")
                             .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.5))
+                            .foregroundColor(t.text(.tertiary))
                         Spacer()
                         Text(String(format: "$%.2f", monitor.snapshot.costBlock))
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.85))
+                            .font(.system(size: 26, weight: .bold, design: .rounded))
+                            .foregroundColor(t.text(.primary))
                             .monospacedDigit()
                     }
                     ProgressTrack(progress: blockProgress())
-                }
-                if monitor.snapshot.planUsage?.fiveHour == nil,
-                   let err = monitor.snapshot.planUsageError {
-                    Text("plan: \(PlanUsageFetcher.hint(for: err))")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundColor(t.secondaryText(0.4))
                 }
                 if let seven = monitor.snapshot.planUsage?.sevenDay {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("Weekly")
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .tracking(0.5)
-                            .foregroundColor(t.secondaryText(0.45))
+                            .foregroundColor(t.text(.tertiary))
                         Text(percentString(seven.utilization))
                             .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundColor(t.secondaryText(0.85))
+                            .foregroundColor(t.text(.secondary))
                             .monospacedDigit()
                         ProgressTrack(progress: max(0, min(1, seven.utilization)))
                             .frame(maxWidth: 120)
@@ -565,26 +695,38 @@ struct IslandView: View {
                         if let reset = seven.resetsAt {
                             Text("resets \(Self.weekdayFormatter.string(from: reset))")
                                 .font(.system(size: 9, weight: .medium, design: .rounded))
-                                .foregroundColor(t.secondaryText(0.4))
+                                .foregroundColor(t.text(.quaternary))
                         }
                     }
                 }
             }
 
-            // Two equal panels at the bottom — no third metric squeezed in.
-            // Sessions count moved to the header (small badge); the split
-            // bar below shows model usage when there's something to compare.
-            HStack(spacing: 14) {
-                miniStat(icon: "sun.max.fill",
-                         label: "Today",
-                         value: formatTokens(monitor.snapshot.tokensToday),
-                         sub: String(format: "$%.2f", monitor.snapshot.costToday))
-                Divider().frame(height: 28).background(t.chrome(0.08))
-                miniStat(icon: "speedometer",
-                         label: "Burn",
-                         value: burnTokensValue,
-                         sub: burnCostValue)
-                    .help("Average burn rate across the current 5h block")
+            // Today summary — single hero line. Editorial layout: the
+            // dollar amount is the visual anchor on the left; the token
+            // count is the secondary metric, right-aligned. No icons or
+            // chrome — the typography hierarchy carries the design.
+            HStack(alignment: .lastTextBaseline, spacing: 0) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("TODAY")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .tracking(0.5)
+                        .foregroundColor(t.text(.tertiary))
+                    Text(String(format: "$%.2f", monitor.snapshot.costToday))
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundColor(t.text(.primary))
+                        .monospacedDigit()
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("TOKENS")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .tracking(0.5)
+                        .foregroundColor(t.text(.tertiary))
+                    Text(formatTokens(monitor.snapshot.tokensToday))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundColor(t.text(.secondary))
+                        .monospacedDigit()
+                }
             }
 
             // Per-model split for the *current 5h session block* — shows
@@ -598,18 +740,7 @@ struct IslandView: View {
         }
     }
 
-    /// Tokens-per-minute portion of the burn miniStat. "—" while no block.
-    private var burnTokensValue: String {
-        guard let tpm = monitor.snapshot.burnRateTokensPerMin, tpm > 0 else { return "—" }
-        return "\(formatTokens(Int(tpm)))/min"
-    }
-    /// $-per-hour portion of the burn miniStat.
-    private var burnCostValue: String {
-        guard let cph = monitor.snapshot.burnRateCostPerHour, cph > 0 else { return "—" }
-        return String(format: "$%.0f/h", cph)
-    }
-
-    /// Color-coded segments scoped to the current 5h session block. Token
+/// Color-coded segments scoped to the current 5h session block. Token
     /// totals drive the bar widths; cost is carried so the legend can show
     /// "$X" per model. Variants of one family (opus-4-6, opus-4-7, etc.)
     /// collapse into one segment with the shared family color.
@@ -659,26 +790,37 @@ struct IslandView: View {
     private func miniStat(icon: String, label: String, value: String, sub: String) -> some View {
         let t = theme
         return HStack(spacing: 10) {
+            // Activity-badge styled icon — gradient fill + hairline stroke
+            // produces a sense of material depth without leaning on
+            // macOS-26-only `.glassEffect()`.
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(t.secondaryText(0.65))
-                .frame(width: 22, height: 22)
+                .foregroundColor(t.text(.secondary))
+                .frame(width: 24, height: 24)
                 .background(
-                    Circle().fill(t.chrome(0.08))
+                    Circle().fill(
+                        LinearGradient(
+                            colors: [t.chrome(0.14), t.chrome(0.05)],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                    )
                 )
-            VStack(alignment: .leading, spacing: 1) {
+                .overlay(
+                    Circle().strokeBorder(t.chrome(0.10), lineWidth: 0.5)
+                )
+            VStack(alignment: .leading, spacing: 2) {
                 Text(label)
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .tracking(0.4)
-                    .foregroundColor(t.secondaryText(0.45))
+                    .tracking(0.5)
+                    .foregroundColor(t.text(.tertiary))
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(value)
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundColor(t.primaryText)
+                        .foregroundColor(t.text(.primary))
                         .monospacedDigit()
                     Text(sub)
                         .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundColor(t.secondaryText(0.5))
+                        .foregroundColor(t.text(.tertiary))
                 }
             }
             Spacer(minLength: 0)
@@ -777,12 +919,12 @@ struct ModelSplitBar: View {
     @Environment(\.ccTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
                     .font(.system(size: 9, weight: .semibold, design: .rounded))
                     .tracking(0.5)
-                    .foregroundColor(theme.secondaryText(0.45))
+                    .foregroundColor(theme.text(.tertiary))
                 Spacer()
                 // Inline legend: dot + name + percent + cost per segment.
                 ForEach(segments) { seg in
@@ -790,12 +932,12 @@ struct ModelSplitBar: View {
                         Circle().fill(seg.color).frame(width: 6, height: 6)
                         Text("\(seg.label) \(Int((seg.fraction * 100).rounded()))%")
                             .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundColor(theme.secondaryText(0.85))
+                            .foregroundColor(theme.text(.secondary))
                             .monospacedDigit()
                         if seg.cost > 0 {
                             Text(String(format: "$%.2f", seg.cost))
                                 .font(.system(size: 9, weight: .medium, design: .rounded))
-                                .foregroundColor(theme.secondaryText(0.5))
+                                .foregroundColor(theme.text(.tertiary))
                                 .monospacedDigit()
                         }
                     }
@@ -815,24 +957,47 @@ struct ModelSplitBar: View {
     }
 }
 
+/// HIG-aligned linear progress indicator with gauge-style semantic
+/// coloring: the fill shifts from the cool accent gradient to a warm
+/// amber as utilization climbs past 80% — same rule the iOS Battery
+/// gauge follows. Below 80% reads as "you have headroom", above signals
+/// "approaching limit".
 struct ProgressTrack: View {
     let progress: Double
     @Environment(\.ccTheme) private var theme
 
+    private var fillColors: [Color] {
+        if progress >= 0.95 {
+            // Critical — saturated coral. Same vibe as system red without
+            // shouting.
+            return [Color(red: 1.0, green: 0.45, blue: 0.40),
+                    Color(red: 1.0, green: 0.30, blue: 0.30)]
+        } else if progress >= 0.8 {
+            // Caution — amber gradient. Reads as warm but not alarming.
+            return [Color(red: 1.0, green: 0.75, blue: 0.35),
+                    Color(red: 1.0, green: 0.55, blue: 0.25)]
+        }
+        return [theme.accentStart, theme.accentEnd]
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
+                // Track with a faint inner-shadow look via stacked fills —
+                // gives the bar depth without an actual `.shadow` (which
+                // would bleed outside the capsule on light themes).
                 Capsule()
                     .fill(theme.progressTrack)
                 Capsule()
                     .fill(
-                        LinearGradient(colors: [theme.accentStart, theme.accentEnd],
+                        LinearGradient(colors: fillColors,
                                        startPoint: .leading, endPoint: .trailing)
                     )
                     .frame(width: max(4, geo.size.width * progress))
+                    .animation(.easeInOut(duration: 0.35), value: progress)
             }
         }
-        .frame(height: 4)
+        .frame(height: 5)
     }
 }
 
@@ -875,9 +1040,18 @@ struct ModelDot: View {
 
     static func colorForModel(_ model: String?) -> Color {
         guard let m = model?.lowercased() else { return Color.gray.opacity(0.55) }
-        if m.contains("opus") { return Color(red: 0.78, green: 0.55, blue: 1.0) }
-        if m.contains("haiku") { return Color.white }
-        if m.contains("sonnet") { return Color(red: 0.45, green: 0.85, blue: 1.0) }
+        // Opus — electric royal purple. Bright and saturated so it reads
+        // crisp at the 8pt dot scale, but still distinctively "Opus" in
+        // the purple family.
+        if m.contains("opus")   { return Color(red: 0.72, green: 0.42, blue: 1.00) }
+        // Sonnet — modern blue. Confident contemporary indigo-blue,
+        // balanced between cool and neutral. The kind of blue you see in
+        // well-designed productivity apps.
+        if m.contains("sonnet") { return Color(red: 0.28, green: 0.58, blue: 1.00) }
+        // Haiku — energetic mint-green. Light and alive, mirroring Haiku's
+        // speed-and-lightness positioning. Distinct from both the regal
+        // purple and the cool blue.
+        if m.contains("haiku")  { return Color(red: 0.28, green: 0.88, blue: 0.65) }
         return Color.gray.opacity(0.55)
     }
 }
@@ -922,5 +1096,53 @@ struct WorkDot: View {
                        ?? .default,
                        value: pulse)
             .onAppear { pulse = true }
+    }
+}
+
+/// FINISH state checkmark with a soft breathing pulse. The work dot
+/// (which used to convey "waiting on you" via a fast blink) is hidden
+/// in the awaiting state, so this carries that signal — gentler than
+/// the dot's old fast strobe but persistent enough to draw the eye.
+struct PulsingCheckmark: View {
+    @State private var pulse = false
+
+    var body: some View {
+        Image(systemName: "checkmark.circle.fill")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(.green)
+            .shadow(color: Color.green.opacity(0.55), radius: pulse ? 4 : 1.5)
+            .scaleEffect(pulse ? 1.12 : 1.0)
+            .opacity(pulse ? 0.88 : 1.0)
+            .animation(
+                .easeInOut(duration: 0.95).repeatForever(autoreverses: true),
+                value: pulse
+            )
+            .onAppear { pulse = true }
+    }
+}
+
+/// Three small dots that pulse in sequence — the canonical "loading"
+/// indicator from iOS Dynamic Island. Each dot fades on a staggered
+/// delay so the row reads as a left-to-right wave.
+struct PulsingDots: View {
+    let color: Color
+    @State private var animating = false
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(color)
+                    .frame(width: 4, height: 4)
+                    .opacity(animating ? 1.0 : 0.25)
+                    .animation(
+                        .easeInOut(duration: 0.6)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(i) * 0.18),
+                        value: animating
+                    )
+            }
+        }
+        .onAppear { animating = true }
     }
 }

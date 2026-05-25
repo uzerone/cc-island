@@ -66,12 +66,6 @@ struct UsageSnapshot {
     /// actionable than today's totals for a per-session percentage.
     var tokensByModelBlock: [String: Int] = [:]
     var costByModelBlock: [String: Double] = [:]
-    /// Average tokens-per-minute over the current 5h block. `nil` when no
-    /// block is active. Use this for the burn-rate readout.
-    var burnRateTokensPerMin: Double?
-    /// Average cost-per-hour ($/h) over the current 5h block — same data as
-    /// `burnRateTokensPerMin` but in dollars, easier to compare against plan.
-    var burnRateCostPerHour: Double?
 
     /// Authoritative plan-budget figures from Anthropic's `/api/oauth/usage`
     /// endpoint — the same data Claude Code's `/usage` slash command and
@@ -324,13 +318,6 @@ final class UsageMonitor: ObservableObject {
             snap.tokensByModelBlock = block.tokensByModel
             snap.costByModelBlock = block.costByModel
 
-            // Burn rate over the current 5h block. Floor the elapsed time
-            // at 60s so a brand-new block (first message ~10s ago) doesn't
-            // produce a screaming "1.2M tok/min" figure from one assistant
-            // turn — that's noise, not signal.
-            let elapsed = max(60, now.timeIntervalSince(block.start))
-            snap.burnRateTokensPerMin = Double(block.tokens) / elapsed * 60
-            snap.burnRateCostPerHour = block.cost / elapsed * 3600
         }
 
         // State + current model from the most-recently-modified file's tail.
