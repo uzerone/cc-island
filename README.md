@@ -4,24 +4,29 @@ A Dynamic-Island-style monitor for [Claude Code](https://claude.com/claude-code)
 
 Hidden when idle. Drops down a status line while Claude is running. Hover to expand the stats card.
 
-[**Download CC Island 1.1.0**](./CC%20Island-1.1.0.dmg) — macOS 13+
+[**Download CC Island 1.2.0**](./CC%20Island-1.2.0.dmg) — macOS 13+
 
-## Dropdown
+## What's new in 1.2.0
 
-`WORKING · 1h 23m` · `THINKING · 1h 23m` · `FINISH` · `14.3k · resets 8:23 AM` (between turns).
+- **Free mode** — detach the pill from the notch and float it anywhere on screen via Settings → Placement.
+- **Burn rate** — expanded card now shows tokens/min and cost/hr for the current session block.
+- **Per-model split** — session bar breaks down usage by Opus / Sonnet / Haiku with cost per model.
+- Performance improvements and bug fixes.
 
 ## Lights
 
 - **Left** — model: 🟣 Opus · 🔵 Sonnet · ⚪️ Haiku. Halo = 1M context. Blink = thinking.
-- **Right** — status: 🟢 working · 🟠 waiting on you · ⚫️ idle.
+- **Right** — status: 🟠 working · 🟢 waiting on you (finish) · ⚫️ idle.
+
+## First launch
+
+The first time you open CC Island, macOS will show a **Keychain access prompt** asking permission for "CC Island" to read the `Claude Code-credentials` item. Click **Always Allow** (or Allow). This is required — CC Island uses your existing Claude Code login to call Anthropic's plan-usage endpoint and show the same percentage you see in claude.ai. Without it the pill still works, but the hero number falls back to a local token estimate.
+
+CC Island never sends your token anywhere except `api.anthropic.com`. No other network calls.
 
 ## Build
 
 ```sh
 swift run -c release          # run from source
 ./scripts/build-dmg.sh        # rebuild the .dmg
-```
-
-Data: `~/.claude/projects/**/*.jsonl`. 5h window matches Claude Code's billing. Plan-percentage isn't available locally.
-
-— [github.com/uzerone](https://github.com/uzerone)
+```)

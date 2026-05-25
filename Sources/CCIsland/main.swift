@@ -90,14 +90,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.contentView = host
         self.window = win
 
-        rebindToCurrentScreen(initial: true)
+        applyPlacement(initial: true)
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            self?.rebindToCurrentScreen(initial: false)
+            self?.applyPlacement(initial: false)
         }
+
+        // Persist free-move position whenever the user drags the window.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: win, queue: .main
+        ) { [weak self] _ in
+            self?.persistFreeOriginIfNeeded()
+        }
+
+        // React to placement mode flips from the Settings picker.
+        // `@Published` fires its subscribers from `willSet`, so reading
+        // `PlacementStore.shared.mode` synchronously here would return the
+        // OLD value — applying the wrong placement and making the UI look
+        // inverted ("click Free → behaves like Notch"). Defer one runloop
+        // turn so the assignment is committed first.
+        PlacementStore.shared.$mode
+            .dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.applyPlacement(initial: false) }
+            }
+            .store(in: &cancellables)
 
         // Global cursor monitor: only let the window receive events when the
         // cursor is actually inside the visible pill. Everywhere else the
@@ -126,6 +147,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastCursorInside = inside
             win.ignoresMouseEvents = !inside
         }
+    }
+
+    /// Branches on the user's placement mode. `.notch` re-runs the
+    /// screen-anchoring rules; `.freeMove` skips screen selection and
+    /// restores the user's saved origin (or centers on first switch).
+    private func applyPlacement(initial: Bool) {
+        guard let win = window else { return }
+        switch PlacementStore.shared.mode {
+        case .notch:
+            // Notch mode needs the near-shield level so the pill overlays
+            // the menu bar / camera housing area cleanly. Not user-movable.
+            win.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) - 1)
+            win.isMovableByWindowBackground = false
+            dismissChooser()
+            rebindToCurrentScreen(initial: initial)
+        case .freeMove:
+            // Free-move mode: ordinary floating window. `.floating` keeps it
+            // visible above app windows but lets system UI (menus, alerts,
+            // Mission Control) sit above it — much friendlier than the
+            // near-shield level used in notch mode.
+            win.level = .floating
+            win.isMovableByWindowBackground = true
+            dismissChooser()
+            placeFreeMove()
+        }
+    }
+
+    /// Position the window in free-move mode. Uses the saved origin if any,
+    /// else centers on the screen currently containing the cursor (or the
+    /// main screen as a fallback). Also re-applies the geometry so the
+    /// expanded-size matches the active screen.
+    private func placeFreeMove() {
+        guard let win = window else { return }
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first!
+        let geo = geometry(for: screen)
+        config.geometry = geo
+        let size = geo.expandedSize
+
+        let origin: CGPoint
+        if let saved = PlacementStore.shared.freeOrigin,
+           NSScreen.screens.contains(where: { $0.frame.intersects(NSRect(origin: saved, size: size)) }) {
+            origin = saved
+        } else {
+            let f = screen.frame
+            origin = CGPoint(x: f.midX - size.width / 2,
+                             y: f.midY - size.height / 2)
+        }
+        win.setFrame(NSRect(origin: origin, size: size), display: true)
+        win.orderFrontRegardless()
+    }
+
+    private func persistFreeOriginIfNeeded() {
+        guard PlacementStore.shared.mode == .freeMove,
+              let win = window else { return }
+        PlacementStore.shared.freeOrigin = win.frame.origin
     }
 
     /// Picks the target screen per the user's rule:
@@ -165,14 +243,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window?.orderFrontRegardless()
     }
 
+    /// Detect screen mode and derive island geometry.
+    ///
+    /// Three signals identify a real notched display:
+    ///   • `safeAreaInsets.top` is non-zero (Apple's official notch height)
+    ///   • Both `auxiliaryTopLeftArea` and `auxiliaryTopRightArea` exist
+    ///     (the menu bar is split around the notch)
+    ///   • The screen is built-in (`CGDisplayIsBuiltin`)
+    ///
+    /// All three usually agree, but we take the union — any one is enough
+    /// to decide we're on a notched MacBook display. For external monitors
+    /// we fall back to a sensible pill width that isn't tied to a notch.
     private func geometry(for screen: NSScreen) -> IslandGeometry {
         let safeTop = screen.safeAreaInsets.top
         let menuBarH = NSStatusBar.system.thickness
-        let notchH = safeTop > 0 ? safeTop : menuBarH
+
         var notchW: CGFloat = 0
         if let auxL = screen.auxiliaryTopLeftArea, let auxR = screen.auxiliaryTopRightArea {
-            notchW = max(0, screen.frame.width - auxL.width - auxR.width)
+            let computed = screen.frame.width - auxL.width - auxR.width
+            // Reject tiny rounding artifacts; a real notch is at least ~150pt.
+            if computed >= 100 { notchW = computed }
         }
+
+        // The notch height is the safe-area inset on notched displays. On
+        // external monitors there's no safe area, so we sit flush with the
+        // menu bar instead.
+        let notchH = safeTop > 0 ? safeTop : menuBarH
+
         return IslandGeometry(notchWidth: notchW,
                               notchHeight: notchH,
                               screenWidth: screen.frame.width)
@@ -191,7 +288,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window = window else { return }
         let f = screen.frame
         let x = f.midX - size.width / 2
-        let y = f.maxY - size.height
+        // On notched MacBooks the pill's top `notchHeight` band intentionally
+        // sits behind the menu bar / notch (visually merging with it). On
+        // external displays there's no notch to merge with — that overlap
+        // just clips the rounded top edge. So we anchor the card *below*
+        // the menu bar on externals to keep the full silhouette visible.
+        let hasNotch = (config.geometry.notchWidth > 0) || (screen.safeAreaInsets.top > 0)
+        let topInset: CGFloat = hasNotch ? 0 : NSStatusBar.system.thickness
+        let y = f.maxY - size.height - topInset
         let target = NSRect(x: x, y: y, width: size.width, height: size.height)
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in

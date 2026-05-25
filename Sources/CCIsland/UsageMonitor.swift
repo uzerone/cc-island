@@ -58,6 +58,21 @@ struct UsageSnapshot {
     var currentModel: String?
     var currentModelTraits: ModelTraits = .init()
 
+    /// Tokens consumed today, broken down by raw model id. Used to render
+    /// the per-model split (Opus / Sonnet / Haiku share) in the card.
+    var tokensByModelToday: [String: Int] = [:]
+    /// Same split but scoped to the *current 5h session block* — the
+    /// window that's actively consuming the user's plan quota. More
+    /// actionable than today's totals for a per-session percentage.
+    var tokensByModelBlock: [String: Int] = [:]
+    var costByModelBlock: [String: Double] = [:]
+    /// Average tokens-per-minute over the current 5h block. `nil` when no
+    /// block is active. Use this for the burn-rate readout.
+    var burnRateTokensPerMin: Double?
+    /// Average cost-per-hour ($/h) over the current 5h block — same data as
+    /// `burnRateTokensPerMin` but in dollars, easier to compare against plan.
+    var burnRateCostPerHour: Double?
+
     /// Authoritative plan-budget figures from Anthropic's `/api/oauth/usage`
     /// endpoint — the same data Claude Code's `/usage` slash command and
     /// claude.ai's "Plan usage" panel display. `nil` while the first fetch
@@ -85,6 +100,9 @@ private struct UsageEntry {
     let cost: Double
     /// `"\(message.id)|\(requestId)"`, or nil when either is missing.
     let dedupKey: String?
+    /// Raw model id (`claude-opus-4-7`, `claude-sonnet-4-6`, …). Kept so the
+    /// expanded card can show today's per-model split without re-parsing.
+    let model: String?
 }
 
 /// Cached per-file state. Invalidated when (mtime, size) changes.
@@ -291,15 +309,28 @@ final class UsageMonitor: ObservableObject {
             }
             snap.tokensToday += e.totalTokens
             snap.costToday += e.cost
+            if let m = e.model {
+                snap.tokensByModelToday[m, default: 0] += e.totalTokens
+            }
         }
 
         // Determine the *current* fixed 5-hour window — matching Claude
         // Code's billing: the window starts at the first message after the
         // previous window expired, then runs for exactly 5 hours. Deduped.
-        if let (windowStart, windowTokens, windowCost) = currentFixedBlock(entries: allEntries, now: now) {
-            snap.blockStart = windowStart
-            snap.tokensBlock = windowTokens
-            snap.costBlock = windowCost
+        if let block = currentFixedBlock(entries: allEntries, now: now) {
+            snap.blockStart = block.start
+            snap.tokensBlock = block.tokens
+            snap.costBlock = block.cost
+            snap.tokensByModelBlock = block.tokensByModel
+            snap.costByModelBlock = block.costByModel
+
+            // Burn rate over the current 5h block. Floor the elapsed time
+            // at 60s so a brand-new block (first message ~10s ago) doesn't
+            // produce a screaming "1.2M tok/min" figure from one assistant
+            // turn — that's noise, not signal.
+            let elapsed = max(60, now.timeIntervalSince(block.start))
+            snap.burnRateTokensPerMin = Double(block.tokens) / elapsed * 60
+            snap.burnRateCostPerHour = block.cost / elapsed * 3600
         }
 
         // State + current model from the most-recently-modified file's tail.
@@ -329,7 +360,8 @@ final class UsageMonitor: ObservableObject {
     /// falls past `start + 5h`. Returns `nil` if the latest window has
     /// already elapsed (no active window — next message starts a new one).
     private func currentFixedBlock(entries: [UsageEntry], now: Date)
-        -> (start: Date, tokens: Int, cost: Double)? {
+        -> (start: Date, tokens: Int, cost: Double,
+            tokensByModel: [String: Int], costByModel: [String: Double])? {
         guard !entries.isEmpty else { return nil }
         let sorted = entries.sorted { $0.ts < $1.ts }
         let windowLen: TimeInterval = 5 * 3600
@@ -337,6 +369,8 @@ final class UsageMonitor: ObservableObject {
         var windowStart = sorted[0].ts
         var tokens = 0
         var cost: Double = 0
+        var tokensByModel: [String: Int] = [:]
+        var costByModel: [String: Double] = [:]
         var seen = Set<String>()
 
         for e in sorted {
@@ -345,6 +379,8 @@ final class UsageMonitor: ObservableObject {
                 windowStart = e.ts
                 tokens = 0
                 cost = 0
+                tokensByModel.removeAll(keepingCapacity: true)
+                costByModel.removeAll(keepingCapacity: true)
                 seen.removeAll(keepingCapacity: true)
             }
             if let k = e.dedupKey {
@@ -352,11 +388,15 @@ final class UsageMonitor: ObservableObject {
             }
             tokens += e.totalTokens
             cost += e.cost
+            if let m = e.model {
+                tokensByModel[m, default: 0] += e.totalTokens
+                costByModel[m, default: 0] += e.cost
+            }
         }
 
         // If `now` is already past the current window, treat it as elapsed.
         if now >= windowStart.addingTimeInterval(windowLen) { return nil }
-        return (windowStart, tokens, cost)
+        return (windowStart, tokens, cost, tokensByModel, costByModel)
     }
 
     // MARK: - Parsing
@@ -475,7 +515,7 @@ final class UsageMonitor: ObservableObject {
         let rid = obj["requestId"] as? String
         let key: String? = (mid != nil && rid != nil) ? "\(mid!)|\(rid!)" : nil
 
-        cache.entries.append(UsageEntry(ts: ts, totalTokens: total, cost: cost, dedupKey: key))
+        cache.entries.append(UsageEntry(ts: ts, totalTokens: total, cost: cost, dedupKey: key, model: model))
     }
 
     typealias LastAssistantInfo = (stopReason: String?, model: String?, traits: ModelTraits)
