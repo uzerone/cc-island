@@ -10,42 +10,58 @@ Requires macOS 13+. **No pre-built binary** — build from source with the scrip
 
 ## What's new in 1.4.0
 
-- The status indicator (three pulsing dots) now looks the same in the dropdown and in the expanded card — no more visual mismatch between the two views.
-- A new badge in Settings tells you whether CC Island can see your Claude login, so you know straight away if the percentage shown is the real number from Anthropic or a local estimate.
-- The "Launch at login" switch is a clean green-when-on toggle, matching the way switches look in macOS System Settings — regardless of your accent color.
+- The little dots that tell you Claude is working now look exactly the same whether you're peeking at the pill or have the full card open.
+- A small note in Settings now tells you, in plain words, whether CC Island can see your Claude login — so you instantly know if the number you're looking at is the real one or just a guess.
+- The "Launch at login" switch is now a friendly green when it's on, just like the switches in your Mac's regular Settings app.
 
 ## 1.3.0
 
-- Smoother motion: pulsing dots while Claude is working, a soft checkmark when it's waiting on you, and the pill quietly tucks away once you've seen it.
-- Fresh model colors — purple for Opus, blue for Sonnet, mint green for Haiku.
-- Cleaner numbers: a hero "today's spend" line, side-by-side tokens and dollars in the session row, and a progress bar that warms up to amber as you approach your limit.
-- No more clutter when nothing's happening — the idle gray dot is gone.
-- Removed the glass/tinted appearance options and the burn-rate panel.
+- Everything moves more smoothly. Little dots pulse while Claude is thinking, a soft checkmark appears when Claude is waiting for you, and the pill politely tucks itself away once you've seen it.
+- New colors for each Claude — purple for Opus, blue for Sonnet, mint green for Haiku.
+- Easier-to-read numbers — your spending today is shown big and bold up top, tokens and dollars sit side by side, and the bar turns orange as you get close to your limit.
+- The little gray dot that used to sit there doing nothing is gone.
+- The frosted-glass look and the speed-of-spending panel were removed — they weren't doing much.
 
 ## 1.2.0
 
-- **Free mode** — drag the pill anywhere on screen instead of pinning it to the notch.
-- See which models you're using — Opus / Sonnet / Haiku — and how much each costs you per session.
-- Burn rate panel (removed in 1.3.0 — it wasn't actually helpful).
-- Speed-ups and small fixes.
+- **Free mode** — you can now drag the pill anywhere on your screen, instead of being stuck under the notch.
+- You can see which Claude you're using — Opus, Sonnet, or Haiku — and how much each one is costing you.
+- A new panel showing how fast you were burning through your budget (later removed in 1.3.0 because it wasn't actually that useful).
+- Things feel a bit snappier, and a few small bugs were fixed.
 
 ## 1.1.0
 
-- The pill now shows the same usage percentage you see in Claude Code's `/usage` and on claude.ai, by reading your existing Claude login.
+- The number on the pill now matches exactly what you see when you type `/usage` inside Claude Code, or look at your "Plan usage" on claude.ai. Before this, it was just a guess.
 
 ## 1.0.0
 
-- First version — a small pill under the notch that estimates token usage from local Claude Code files.
+- The very first version — a tiny pill under your Mac's notch that takes a rough guess at how much of Claude you've used today.
 
-## First launch — please choose "Always Allow"
+## First launch — please click "Always Allow"
 
-The first time you open CC Island, macOS will show a **Keychain access prompt** asking permission for "CC Island" to read the `Claude Code-credentials` item.
+The first time you open CC Island, a little window will pop up from your Mac asking if CC Island can look at your Claude login.
 
-> **Click "Always Allow".**
-> If you click "Allow" once, macOS will re-prompt every launch — annoying. "Always Allow" is the same trust level you already gave Claude Code itself.
-> If you click "Deny", CC Island still runs but the hero percentage falls back to a local token estimate instead of the exact figure Anthropic reports.
+**Please click the "Always Allow" button.**
 
-CC Island uses your existing Claude Code login to call Anthropic's plan-usage endpoint — the same data Claude Code's `/usage` command and claude.ai's "Plan usage" panel display. **Your token never leaves your machine except to `api.anthropic.com`.** No telemetry, no other network calls.
+That's it. CC Island can now show you the exact same usage percentage you see inside Claude Code and on claude.ai.
+
+A few things worth knowing:
+
+- **Why two buttons?** "Allow" only works for one launch — so the window will pop up again next time you open CC Island, and the time after that, and so on. "Always Allow" means you only have to do this once.
+- **Is it safe?** Yes. CC Island only uses your login to ask Anthropic "how much have I used this month?" — the same question Claude Code asks. Your login never goes anywhere else, and CC Island doesn't send any data to anyone but Anthropic.
+- **What if I click "Deny"?** CC Island still works — it just shows a rough guess of your usage based on local files instead of the exact number from Anthropic.
+
+### Want "Always Allow" to stick when you update CC Island?
+
+If you don't do anything special, every new version of CC Island will look like a brand-new app to your Mac, so the "Always Allow" prompt will come back every time you update.
+
+To fix this, open Terminal **once** and run:
+
+```sh
+./scripts/setup-signing-identity.sh
+```
+
+You only ever need to run this once. After that, click "Always Allow" the next time the prompt shows up, and you'll never see it again — even when you install a newer version of CC Island.
 
 ## Build
 
